@@ -50,6 +50,40 @@ The downloaded source file is kept in ignored `data/raw/` and is not committed.
 
 The first Compose run initializes a PostgreSQL volume and grants the dedicated `sqlpilot_reader` role access. Removing the `postgres_data` volume resets the database and applies database initialization again: `docker compose down -v`.
 
+## Upload a CSV dataset
+
+Start the API and its Compose dependencies if they are not already running:
+
+```sh
+docker compose up --build -d api
+```
+
+Create a small UTF-8 CSV sample and upload it:
+
+```sh
+sample_csv="$(mktemp)"
+cat > "$sample_csv" <<'CSV'
+customer_id,order_total,order_date
+001,12.50,2025-01-30
+002,18.75,2025-01-31
+CSV
+curl --fail-with-body -X POST http://localhost:8000/api/datasets/upload \
+  -F "file=@${sample_csv};filename=sample.csv;type=text/csv"
+rm "$sample_csv"
+```
+
+The response includes the generated dataset UUID, display name, isolated PostgreSQL schema and table, normalized and original column names, inferred types, and row and column counts. Uploads are limited to 10 MiB and 100 columns.
+
+For a full-stack smoke test with the UCI Bike Sharing `day.csv` and the uploaded-dataset query endpoint, see [Architecture and smoke tests](docs/architecture.md#manual-smoke-test).
+
+Run backend tests from the repository root:
+
+```sh
+cd backend
+python -m pip install -r requirements.txt
+python -m pytest
+```
+
 ## Run backend locally
 
 Requires Python 3.12+, PostgreSQL 16+, and Ollama. Set the variables from `.env.example` in your shell or copy it to `.env` at the repository root, changing the database host from `db` to `localhost` in both URLs for local processes. The SQL schema is initialized with the writer URL; data queries use the separate reader URL.
@@ -65,13 +99,15 @@ uvicorn app.main:app --reload
 
 The React development server runs with `cd frontend && npm ci && npm run dev`; its `/api` requests are proxied to `localhost:8000`.
 
-## Safety and architecture
+## Architecture and safety
 
 - The FastAPI app introspects the live schema through SQLAlchemy and sends only that schema plus the question to Ollama.
 - SQLGlot parses a single PostgreSQL `SELECT`, rejects non-allowlisted tables, and injects or caps a `LIMIT`.
 - Query execution uses only `sqlpilot_reader`, which has `SELECT` grants; a transaction-local `statement_timeout` limits query time. The API reads at most the capped result set.
 - `DATABASE_URL` is reserved for initialization/import; `READONLY_DATABASE_URL` is used for all schema introspection and query execution.
 - Ollama runs locally. The prompt requests structured JSON containing SQL and an explanation. Review the SQL shown in the UI for analytical correctness.
+
+Uploaded CSV handling, per-dataset schema isolation, request flow, API routes, and a repeatable Bike Sharing smoke test are described in [docs/architecture.md](docs/architecture.md).
 
 ## Checks
 

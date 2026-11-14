@@ -1,17 +1,20 @@
 import logging
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .config import settings
+from .datasets import router as datasets_router
+from .dataset_models import UploadedDataset
 from .db import reader_engine
-from .llm import generate_sql
+from .llm import generate_dataset_sql, generate_sql
 from .schema import get_schema
 from .sql_safety import UnsafeQuery, validate_select
 
@@ -140,3 +143,109 @@ async def ask(request: AskRequest):
         rows=rows,
         row_count=len(rows)
     )
+
+
+@app.post(
+    "/api/datasets/{dataset_id}/ask",
+    response_model=AskResponse,
+)
+async def ask_dataset(dataset_id: UUID, request: AskRequest):
+    try:
+        with reader_engine.connect() as conn:
+            dataset_row = conn.execute(
+                select(UploadedDataset.__table__).where(
+                    UploadedDataset.dataset_id == dataset_id
+                )
+            ).mappings().one_or_none()
+            dataset = UploadedDataset(**dict(dataset_row)) if dataset_row else None
+    except SQLAlchemyError as exc:
+        logger.exception("Dataset metadata retrieval failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Dataset metadata is unavailable.",
+        ) from exc
+
+    if dataset is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    try:
+        sql, explanation = await generate_dataset_sql(
+            request.question,
+            dataset.dataset_name,
+            dataset.schema_name,
+            dataset.table_name,
+            dataset.columns_info,
+        )
+
+        if not sql:
+            return AskResponse(
+                sql="",
+                explanation=explanation,
+                columns=[],
+                rows=[],
+                row_count=0,
+            )
+
+        safe_sql = validate_select(
+            sql,
+            settings.max_rows,
+            allowed_tables={dataset.table_name},
+            allowed_schemas={dataset.schema_name},
+        )
+
+    except UnsafeQuery as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    except httpx.HTTPError as exc:
+        logger.exception("Ollama request failed for uploaded dataset")
+        raise HTTPException(
+            status_code=503,
+            detail="Ollama is unavailable. Start Ollama and pull the configured model.",
+        ) from exc
+
+    except (SQLAlchemyError, ValueError) as exc:
+        logger.exception("Dataset SQL generation or validation failed")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not generate a safe query: {exc}",
+        ) from exc
+
+    try:
+        with reader_engine.begin() as conn:
+            conn.execute(
+                text(
+                    f"SET LOCAL statement_timeout = "
+                    f"{int(settings.query_timeout_ms)}"
+                )
+            )
+            # All physical dataset table references must be qualified by the
+            # validator, so keep unqualified names out of every user schema.
+            conn.execute(text("SET LOCAL search_path TO pg_catalog"))
+
+            result = conn.execute(text(safe_sql))
+            columns = list(result.keys())
+            rows = [
+                {
+                    key: serialize(value)
+                    for key, value in row._mapping.items()
+                }
+                for row in result.fetchmany(settings.max_rows)
+            ]
+
+    except SQLAlchemyError as exc:
+        logger.exception("Generated dataset query execution failed. SQL: %s", safe_sql)
+        raise HTTPException(
+            status_code=422,
+            detail="The generated query could not be executed.",
+        ) from exc
+
+    return AskResponse(
+        sql=safe_sql,
+        explanation=explanation,
+        columns=columns,
+        rows=rows,
+        row_count=len(rows),
+    )
+
+
+app.include_router(datasets_router)
