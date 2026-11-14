@@ -249,11 +249,10 @@ def parse_csv_upload(
                 status_code=422,
                 detail=f"CSV may contain at most {MAX_COLUMNS} columns",
             )
-        if any(not header.strip() for header in headers):
-            raise HTTPException(status_code=422, detail="CSV headers cannot be blank")
         if any("\x00" in header for header in headers):
             raise HTTPException(status_code=422, detail="CSV headers cannot contain NUL bytes")
-        if len(set(headers)) != len(headers):
+        named_headers = [header for header in headers if header.strip()]
+        if len(set(named_headers)) != len(named_headers):
             raise HTTPException(status_code=422, detail="CSV contains duplicate headers")
 
         rows = []
@@ -274,6 +273,55 @@ def parse_csv_upload(
                     detail=f"CSV record {record_number} contains a NUL byte",
                 )
             rows.append(row)
+
+        blank_header_indexes = [
+            index for index, header in enumerate(headers) if not header.strip()
+        ]
+        populated_blank_header_indexes = [
+            index
+            for index in blank_header_indexes
+            if any(row[index].strip() for row in rows)
+        ]
+        if populated_blank_header_indexes:
+            positions = ", ".join(
+                str(index + 1) for index in populated_blank_header_indexes
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "CSV has data under blank headers at column position(s): "
+                    f"{positions}. Name these columns or remove their data before upload."
+                ),
+            )
+
+        named_indexes = [
+            index for index, header in enumerate(headers) if header.strip()
+        ]
+        if not named_indexes:
+            raise HTTPException(
+                status_code=422,
+                detail="CSV must contain at least one named column",
+            )
+
+        last_named_index = named_indexes[-1]
+        interior_blank_indexes = [
+            index for index in blank_header_indexes if index < last_named_index
+        ]
+        if interior_blank_indexes:
+            positions = ", ".join(
+                str(index + 1) for index in interior_blank_indexes
+            )
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "CSV has blank headers in interior column position(s): "
+                    f"{positions}. Blank headers are allowed only in empty trailing columns."
+                ),
+            )
+
+        if last_named_index + 1 < len(headers):
+            headers = headers[: last_named_index + 1]
+            rows = [row[: last_named_index + 1] for row in rows]
     except csv.Error as error:
         raise HTTPException(status_code=422, detail=f"Malformed CSV: {error}") from error
 

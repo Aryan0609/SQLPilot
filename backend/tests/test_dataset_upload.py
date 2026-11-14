@@ -158,6 +158,53 @@ def test_duplicate_headers_are_rejected(client, database):
     assert database.commits == []
 
 
+def test_empty_trailing_unnamed_columns_are_ignored(client, database):
+    response = upload(
+        client,
+        content=b"name,note,,, \nAda,, , ,   \nGrace,ok,,,\n",
+    )
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["row_count"] == 2
+    assert body["column_count"] == 2
+    assert [column["original_name"] for column in body["schema"]["columns"]] == [
+        "name",
+        "note",
+    ]
+
+    _, insert_parameters = next(
+        (sql, parameters)
+        for transaction in database.commits
+        for sql, parameters in transaction
+        if "INSERT INTO" in sql and '"records"' in sql
+    )
+    assert insert_parameters[0]["note"] is None
+    assert insert_parameters[1]["note"] == "ok"
+
+
+def test_blank_header_with_data_is_rejected_with_column_positions(client, database):
+    response = upload(client, content=b"name,,,\nAda,,value,tail\n")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "CSV has data under blank headers at column position(s): 3, 4. "
+        "Name these columns or remove their data before upload."
+    )
+    assert database.commits == []
+
+
+def test_empty_interior_blank_header_is_rejected(client, database):
+    response = upload(client, content=b"name,,amount\nAda,,1\n")
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "CSV has blank headers in interior column position(s): 2. "
+        "Blank headers are allowed only in empty trailing columns."
+    )
+    assert database.commits == []
+
+
 def test_duplicate_normalized_headers_are_rejected(client, database):
     response = upload(client, content=b"Customer ID,customer-id\n1,2\n")
     assert response.status_code == 422

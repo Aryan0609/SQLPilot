@@ -76,7 +76,7 @@ curl --fail-with-body -X POST http://localhost:8000/api/datasets/upload \
 rm "$sample_csv"
 ```
 
-The response includes the generated dataset UUID, display name, isolated PostgreSQL schema and table, normalized and original column names, inferred types, and row and column counts. Uploads are limited to 10 MiB and 100 columns.
+The response includes the generated dataset UUID, display name, isolated PostgreSQL schema and table, normalized and original column names, inferred types, and row and column counts. Uploads are limited to 10 MiB and 100 columns. Completely empty trailing columns with blank headers are ignored, while empty cells under named headers are kept as nulls. Blank headers containing data are rejected with their column positions; empty blank headers between named columns are also rejected. Each non-empty CSV record must match the header width.
 
 For a full-stack smoke test with the UCI Bike Sharing `day.csv` and the uploaded-dataset query endpoint, see [Architecture and smoke tests](docs/architecture.md#manual-smoke-test).
 
