@@ -1,13 +1,21 @@
 import json
+import logging
 import re
+from time import perf_counter
 
 import httpx
 
 from .config import settings
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
 
 _MISSING_COLUMN_TERMS = re.compile(
     r"\b(?:missing|unavailable|not\s+available|not\s+present|not\s+found|"
+    r"no\s+(?:such\s+)?columns?|"
+    r"does\s+not\s+exist|doesn't\s+exist|"
+    r"cannot\s+find|can't\s+find|"
     r"additional\s+columns?)\b",
     re.IGNORECASE,
 )
@@ -36,6 +44,7 @@ async def _request_sql_from_prompt(
     default_explanation: str,
     allow_empty_sql: bool = False,
 ) -> tuple[str, str]:
+    started = perf_counter()
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(
             f"{settings.ollama_base_url.rstrip('/')}/api/generate",
@@ -48,7 +57,23 @@ async def _request_sql_from_prompt(
         )
         response.raise_for_status()
 
-    payload = json.loads(response.json()["response"])
+    ollama_response = response.json()
+    elapsed_ms = (perf_counter() - started) * 1000
+    duration_ms = {
+        key: round(ollama_response[key] / 1_000_000, 1)
+        for key in ("total_duration", "load_duration", "prompt_eval_duration", "eval_duration")
+        if isinstance(ollama_response.get(key), (int, float))
+    }
+    logger.info(
+        "Ollama generation completed in %.1f ms (model=%s, durations_ms=%s, prompt_tokens=%s, generated_tokens=%s)",
+        elapsed_ms,
+        settings.ollama_model,
+        duration_ms,
+        ollama_response.get("prompt_eval_count", "unknown"),
+        ollama_response.get("eval_count", "unknown"),
+    )
+
+    payload = json.loads(ollama_response["response"])
     if not isinstance(payload, dict):
         raise ValueError("The model returned invalid JSON")
 
@@ -125,6 +150,11 @@ SQL GENERATION RULES:
 17. Apply a reasonable LIMIT when the question requests a
     limited result set. The application also enforces its own
     maximum row limit.
+18. When the user asks to show, list, view, or inspect matching rows or
+    records, return complete records with all columns from the relevant table
+    (or all relevant table aliases for a joined record). Keep the requested
+    filters and ordering, and respect the application's row limit. Do not
+    summarize or aggregate those records.
 
 IMPORTANT AGGREGATION EXAMPLE:
 
@@ -219,6 +249,9 @@ RULES:
    `sql_column` values. Never say a listed SQL column is missing or unavailable.
 9. If the question genuinely requires a field that is not listed, return an empty
    SQL string and name only the absent field in the explanation. Do not guess.
+10. When the user asks to show, list, view, or inspect matching rows or records,
+    select every column from the uploaded table. Keep requested filters and
+    ordering, and respect the application's row limit. Do not aggregate them.
 
 Return valid JSON with exactly these two keys:
 {{

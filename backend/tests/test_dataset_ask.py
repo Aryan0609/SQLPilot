@@ -169,10 +169,14 @@ def test_valid_dataset_query_uses_selected_schema_and_returns_results(
     assert response.status_code == 200
     body = response.json()
     assert body["sql"].endswith("LIMIT 10")
-    assert body["explanation"] == "A test explanation."
+    assert body["explanation"] == "The result is product: Widget; total revenue: 25.5."
     assert body["columns"] == ["product", "total_revenue"]
     assert body["rows"] == [{"product": "Widget", "total_revenue": 25.5}]
     assert body["row_count"] == 1
+    assert body["follow_up_questions"] == [
+        "How does revenue_gbp vary by product_name?",
+        "Show the first 10 rows including product_name.",
+    ]
     assert calls[0]["schema_name"] == dataset.schema_name
     assert calls[0]["table_name"] == dataset.table_name
     assert calls[0]["columns_info"] == dataset.columns_info
@@ -225,6 +229,7 @@ def test_dataset_prompt_includes_only_column_metadata():
     assert "Revenue GBP" in prompt
     assert "NUMERIC" in prompt
     assert "Do not invent columns, tables" in prompt
+    assert "select every column from the uploaded table" in prompt
     assert "CSV contents" not in prompt
 
 
@@ -383,6 +388,10 @@ def test_unanswerable_question_returns_explanation_without_execution(
         "columns": [],
         "rows": [],
         "row_count": 0,
+        "follow_up_questions": [
+            "How does revenue_gbp vary by product_name?",
+            "Show the first 10 rows including product_name.",
+        ],
     }
     assert reader.executed_queries == []
 
@@ -425,6 +434,34 @@ def test_row_limit_and_statement_timeout_are_enforced(
     assert any("statement_timeout = 4321" in s for s in reader.statements)
 
 
+def test_list_records_returns_full_rows_with_the_existing_result_limit(
+    client, dataset, reader, set_generator
+):
+    reader.result_columns = ["product_name", "revenue_gbp"]
+    reader.result_rows = [{"product_name": "Widget", "revenue_gbp": 25.5}]
+    set_generator(
+        f'SELECT "product_name" FROM "{dataset.schema_name}"."records" '
+        'WHERE "product_name" = \'Widget\' ORDER BY "revenue_gbp" DESC LIMIT 500'
+    )
+
+    response = ask_dataset(
+        client,
+        dataset,
+        "Show matching records where product_name is Widget",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "SELECT *" in body["sql"].upper()
+    assert "WHERE" in body["sql"].upper()
+    assert body["sql"].endswith("LIMIT 200")
+    assert body["columns"] == ["product_name", "revenue_gbp"]
+    assert body["rows"] == [{"product_name": "Widget", "revenue_gbp": 25.5}]
+    assert body["explanation"] == (
+        "The query returned 1 matching record. Each returned row is shown in full below."
+    )
+
+
 def test_existing_online_retail_endpoint_remains_independent(
     client, reader, monkeypatch
 ):
@@ -436,8 +473,8 @@ def test_existing_online_retail_endpoint_remains_independent(
 
     monkeypatch.setattr(main, "generate_sql", generate_retail_sql)
     monkeypatch.setattr(main, "get_schema", lambda: "retail schema")
-    reader.result_columns = ["customer_id"]
-    reader.result_rows = [{"customer_id": "123"}]
+    reader.result_columns = ["customer_id", "country"]
+    reader.result_rows = [{"customer_id": "123", "country": "United Kingdom"}]
 
     response = client.post(
         "/api/ask",
@@ -445,8 +482,10 @@ def test_existing_online_retail_endpoint_remains_independent(
     )
 
     assert response.status_code == 200
-    assert response.json()["sql"] == "SELECT customer_id FROM public.customers LIMIT 5"
-    assert response.json()["rows"] == [{"customer_id": "123"}]
+    assert response.json()["sql"] == "SELECT customers.* FROM public.customers LIMIT 5"
+    assert response.json()["rows"] == [
+        {"customer_id": "123", "country": "United Kingdom"}
+    ]
     assert calls == [("Show a few customers", "retail schema")]
     assert not any("search_path TO pg_catalog" in statement for statement in reader.statements)
 
@@ -529,7 +568,9 @@ def test_uci_bike_sharing_csv_upload_then_dataset_query(
     assert response.status_code == 200
     result = response.json()
     assert result["sql"].endswith("LIMIT 200")
-    assert result["explanation"] == "Average daily rentals by season."
+    assert result["explanation"] == (
+        "Among the returned results, 2 has the highest average daily rentals at 2,088."
+    )
     assert result["columns"] == ["season", "average_daily_rentals"]
     assert result["rows"] == reader.result_rows
     assert result["row_count"] == 2

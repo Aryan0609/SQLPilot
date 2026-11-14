@@ -1,6 +1,7 @@
 import logging
 from datetime import date, datetime
 from decimal import Decimal
+from time import perf_counter
 from uuid import UUID
 
 import httpx
@@ -15,10 +16,22 @@ from .datasets import router as datasets_router
 from .dataset_models import UploadedDataset
 from .db import reader_engine
 from .llm import generate_dataset_sql, generate_sql
+from .response_insights import (
+    build_follow_up_questions,
+    ensure_dataset_full_rows,
+    ensure_online_full_rows,
+    parse_online_columns,
+    summarize_answer,
+)
 from .schema import get_schema
 from .sql_safety import UnsafeQuery, validate_select
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 app = FastAPI(
     title="SQLPilot",
@@ -44,6 +57,7 @@ class AskResponse(BaseModel):
     columns: list[str]
     rows: list[dict]
     row_count: int
+    follow_up_questions: list[str] = Field(default_factory=list)
 
 
 def serialize(value):
@@ -69,9 +83,9 @@ def health():
 
 
 @app.get("/api/schema")
-def schema():
+def schema(refresh: bool = False):
     try:
-        return {"schema": get_schema()}
+        return {"schema": get_schema(force_refresh=refresh)}
     except SQLAlchemyError as exc:
         logger.exception("Schema retrieval failed")
         raise HTTPException(
@@ -82,11 +96,14 @@ def schema():
 
 @app.post("/api/ask", response_model=AskResponse)
 async def ask(request: AskRequest):
+    request_started = perf_counter()
     try:
+        active_schema = get_schema()
         sql, explanation = await generate_sql(
             request.question,
-            get_schema()
+            active_schema
         )
+        sql = ensure_online_full_rows(sql, request.question, active_schema)
         safe_sql = validate_select(sql, settings.max_rows)
 
     except UnsafeQuery as exc:
@@ -106,6 +123,7 @@ async def ask(request: AskRequest):
             f"Could not generate a safe query: {exc}"
         ) from exc
 
+    query_started = perf_counter()
     try:
         with reader_engine.begin() as conn:
             conn.execute(
@@ -136,12 +154,33 @@ async def ask(request: AskRequest):
             detail="The generated query could not be executed."
         ) from exc
 
+    summary = summarize_answer(
+        request.question,
+        safe_sql,
+        columns,
+        rows,
+        explanation,
+    )
+    follow_ups = build_follow_up_questions(
+        request.question,
+        parse_online_columns(active_schema),
+        columns,
+        rows,
+        safe_sql,
+    )
+    logger.info(
+        "Online Retail ask completed in %.1f ms (database_query_ms=%.1f, rows=%d)",
+        (perf_counter() - request_started) * 1000,
+        (perf_counter() - query_started) * 1000,
+        len(rows),
+    )
     return AskResponse(
         sql=safe_sql,
-        explanation=explanation,
+        explanation=summary,
         columns=columns,
         rows=rows,
-        row_count=len(rows)
+        row_count=len(rows),
+        follow_up_questions=follow_ups,
     )
 
 
@@ -150,6 +189,7 @@ async def ask(request: AskRequest):
     response_model=AskResponse,
 )
 async def ask_dataset(dataset_id: UUID, request: AskRequest):
+    request_started = perf_counter()
     try:
         with reader_engine.connect() as conn:
             dataset_row = conn.execute(
@@ -178,14 +218,25 @@ async def ask_dataset(dataset_id: UUID, request: AskRequest):
         )
 
         if not sql:
+            logger.info(
+                "Uploaded dataset ask completed without SQL in %.1f ms",
+                (perf_counter() - request_started) * 1000,
+            )
             return AskResponse(
                 sql="",
                 explanation=explanation,
                 columns=[],
                 rows=[],
                 row_count=0,
+                follow_up_questions=build_follow_up_questions(
+                    request.question,
+                    dataset.columns_info,
+                    [],
+                    [],
+                ),
             )
 
+        sql = ensure_dataset_full_rows(sql, request.question, dataset.table_name)
         safe_sql = validate_select(
             sql,
             settings.max_rows,
@@ -210,6 +261,7 @@ async def ask_dataset(dataset_id: UUID, request: AskRequest):
             detail=f"Could not generate a safe query: {exc}",
         ) from exc
 
+    query_started = perf_counter()
     try:
         with reader_engine.begin() as conn:
             conn.execute(
@@ -239,12 +291,33 @@ async def ask_dataset(dataset_id: UUID, request: AskRequest):
             detail="The generated query could not be executed.",
         ) from exc
 
+    summary = summarize_answer(
+        request.question,
+        safe_sql,
+        columns,
+        rows,
+        explanation,
+    )
+    follow_ups = build_follow_up_questions(
+        request.question,
+        dataset.columns_info,
+        columns,
+        rows,
+        safe_sql,
+    )
+    logger.info(
+        "Uploaded dataset ask completed in %.1f ms (database_query_ms=%.1f, rows=%d)",
+        (perf_counter() - request_started) * 1000,
+        (perf_counter() - query_started) * 1000,
+        len(rows),
+    )
     return AskResponse(
         sql=safe_sql,
-        explanation=explanation,
+        explanation=summary,
         columns=columns,
         rows=rows,
         row_count=len(rows),
+        follow_up_questions=follow_ups,
     )
 
 

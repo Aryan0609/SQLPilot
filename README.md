@@ -33,6 +33,10 @@ The downloaded source file is kept in ignored `data/raw/` and is not committed.
    docker compose up --build -d
    ```
 
+   The web and API services mount their source folders and reload code changes, so
+   frontend and backend edits are visible without relying on an old image layer.
+   Rebuild with `--build` after changing dependencies or a Dockerfile.
+
 3. Pull the local language model once (about 2 GB depending on the model):
 
    ```sh
@@ -102,6 +106,7 @@ The React development server runs with `cd frontend && npm ci && npm run dev`; i
 ## Architecture and safety
 
 - The FastAPI app introspects the live schema through SQLAlchemy and sends only that schema plus the question to Ollama.
+- Schema metadata is cached for 30 seconds between asks; the UI forces a refresh on page load. API logs report schema refresh, Ollama generation, database query, and total request timings.
 - SQLGlot parses a single PostgreSQL `SELECT`, rejects non-allowlisted tables, and injects or caps a `LIMIT`.
 - Query execution uses only `sqlpilot_reader`, which has `SELECT` grants; a transaction-local `statement_timeout` limits query time. The API reads at most the capped result set.
 - `DATABASE_URL` is reserved for initialization/import; `READONLY_DATABASE_URL` is used for all schema introspection and query execution.

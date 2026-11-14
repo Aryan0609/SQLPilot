@@ -22,6 +22,7 @@ type AskResponse = {
   columns: string[];
   rows: Record<string, unknown>[];
   row_count: number;
+  follow_up_questions: string[];
 };
 
 type QueryResult = AskResponse & {
@@ -34,8 +35,19 @@ type OnlineColumn = { name: string; type: string };
 type OnlineTable = { name: string; columns: OnlineColumn[] };
 
 const STORAGE_KEY = 'sqlpilot.uploaded-datasets.v1';
+const THEME_STORAGE_KEY = 'sqlpilot.theme.v1';
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
 const ONLINE_RETAIL = 'online-retail';
+
+type Theme = 'dark' | 'light';
+
+function readSavedTheme(): Theme {
+  try {
+    return localStorage.getItem(THEME_STORAGE_KEY) === 'light' ? 'light' : 'dark';
+  } catch {
+    return 'dark';
+  }
+}
 
 function readSavedDatasets(): UploadedDataset[] {
   try {
@@ -112,20 +124,139 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
+type ChartPoint = { label: string; value: number };
+type ChartInfo = { dimension: string; measure: string; points: ChartPoint[] };
+type KpiInfo = { label: string; value: string };
+type RecentQuestion = { datasetId: string; question: string };
+
+function isFullRowRequest(question: string): boolean {
+  const text = question.toLowerCase();
+  const action = /\b(show|list|display|inspect|view|see|return|give me|find)\b/;
+  const records = /\b(rows?|records?|entries|transactions?|line items?)\b/;
+  const entities = /\b(customers?|products?|orders?|invoices?)\b/;
+  const analytical = /\b(top|rank|highest|lowest|average|mean|sum|total|revenue|sales|count|compare|group|per|by)\b/;
+  return (action.test(text) && records.test(text))
+    || (/\b(all|complete|full|matching)\b/.test(text) && (records.test(text) || entities.test(text)))
+    || (action.test(text) && entities.test(text) && !analytical.test(text));
+}
+
+function chartInfo(result: QueryResult): ChartInfo | null {
+  if (isFullRowRequest(result.question) || result.rows.length < 2 || result.rows.length > 12) return null;
+
+  const numericColumns = result.columns.filter((column) => result.rows.some((row) => (
+    typeof row[column] === 'number' && Number.isFinite(row[column])
+  )));
+  if (!numericColumns.length) return null;
+  const dimensionColumns = result.columns.filter((column) => (
+    !numericColumns.includes(column)
+    || (numericColumns.length > 1 && column === numericColumns[0])
+  ));
+  if (!dimensionColumns.length) return null;
+
+  const measure = numericColumns.length > 1
+    ? numericColumns[numericColumns.length - 1]
+    : numericColumns[0];
+  const dimension = dimensionColumns[0];
+  const points = result.rows.map((row) => ({
+    label: formatValue(row[dimension]),
+    value: Number(row[measure]),
+  }));
+  if (points.some((point) => !Number.isFinite(point.value) || point.value < 0)) return null;
+  if (points.every((point) => point.value === 0)) return null;
+  return { dimension, measure, points };
+}
+
+function ResultChart({ result }: { result: QueryResult }) {
+  const chart = chartInfo(result);
+  if (!chart) return null;
+  const maximum = Math.max(...chart.points.map((point) => point.value));
+
+  return (
+    <section className="card chart-card" aria-label={`${prettyName(chart.measure)} by ${prettyName(chart.dimension)}`}>
+      <div className="chart-header">
+        <div><p>AT A GLANCE</p><strong>{prettyName(chart.measure)} by {prettyName(chart.dimension)}</strong></div>
+        <span>{chart.points.length} values</span>
+      </div>
+      <div className="chart-bars" role="img" aria-label={`${prettyName(chart.measure)} values across ${prettyName(chart.dimension)}`}>
+        {chart.points.map((point, index) => (
+          <div className="chart-row" key={`${point.label}-${index}`}>
+            <span className="chart-label" title={point.label}>{point.label}</span>
+            <span className="chart-track"><i style={{ width: `${Math.max(2, (point.value / maximum) * 100)}%` }} /></span>
+            <strong>{formatValue(point.value)}</strong>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function resultKpis(result: QueryResult): KpiInfo[] {
+  if (isFullRowRequest(result.question) || result.rows.length !== 1) return [];
+  const row = result.rows[0];
+  return result.columns
+    .filter((column) => typeof row[column] === 'number' && Number.isFinite(row[column]))
+    .slice(0, 4)
+    .map((column) => ({ label: prettyName(column), value: formatValue(row[column]) }));
+}
+
+function ResultKpis({ result }: { result: QueryResult }) {
+  const kpis = resultKpis(result);
+  if (!kpis.length) return null;
+
+  return (
+    <section className="kpi-grid" aria-label="Key result values">
+      {kpis.map((kpi) => (
+        <article className="card kpi-card" key={kpi.label}>
+          <span>{kpi.label}</span>
+          <strong>{kpi.value}</strong>
+        </article>
+      ))}
+    </section>
+  );
+}
+
 function App() {
+  const [theme, setTheme] = React.useState<Theme>(readSavedTheme);
   const [uploadedDatasets, setUploadedDatasets] = React.useState(readSavedDatasets);
   const [selectedDatasetId, setSelectedDatasetId] = React.useState(ONLINE_RETAIL);
   const [onlineSchema, setOnlineSchema] = React.useState('');
+  const [schemaError, setSchemaError] = React.useState('');
   const [apiStatus, setApiStatus] = React.useState<'checking' | 'online' | 'offline'>('checking');
   const [question, setQuestion] = React.useState('What were the top 10 products by revenue?');
   const [uploading, setUploading] = React.useState(false);
+  const [draggingFile, setDraggingFile] = React.useState(false);
   const [uploadMessage, setUploadMessage] = React.useState('');
   const [uploadError, setUploadError] = React.useState('');
   const [asking, setAsking] = React.useState(false);
   const [queryError, setQueryError] = React.useState('');
   const [result, setResult] = React.useState<QueryResult | null>(null);
   const [copied, setCopied] = React.useState(false);
+  const [recentQuestions, setRecentQuestions] = React.useState<RecentQuestion[]>([]);
+  const [requestStartedAt, setRequestStartedAt] = React.useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
   const fileInput = React.useRef<HTMLInputElement>(null);
+
+  React.useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    document.querySelector('meta[name="theme-color"]')?.setAttribute(
+      'content',
+      theme === 'dark' ? '#0b0e0c' : '#f6f7f4',
+    );
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // The selected theme still applies for this session when storage is unavailable.
+    }
+  }, [theme]);
+
+  React.useEffect(() => {
+    if (requestStartedAt === null) return;
+    const updateElapsed = () => setElapsedSeconds(Math.floor((Date.now() - requestStartedAt) / 1000));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 1000);
+    return () => window.clearInterval(timer);
+  }, [requestStartedAt]);
 
   React.useEffect(() => {
     let active = true;
@@ -139,17 +270,20 @@ function App() {
         if (active) setApiStatus('offline');
       });
 
-    fetch('/api/schema')
+    fetch('/api/schema?refresh=true')
       .then(async (response) => {
         const payload = await readJson(response);
         if (!response.ok) throw new Error(getErrorMessage(payload, 'Could not load Online Retail schema.'));
         const schema = payload && typeof payload === 'object' && 'schema' in payload
           ? (payload as { schema: unknown }).schema
           : '';
-        if (active && typeof schema === 'string') setOnlineSchema(schema);
+        if (active && typeof schema === 'string') {
+          setOnlineSchema(schema);
+          setSchemaError('');
+        }
       })
       .catch(() => {
-        // The health indicator and query error give the user a visible connection state.
+        if (active) setSchemaError('Could not load the built-in schema. Check the API connection and refresh.');
       });
 
     return () => { active = false; };
@@ -252,14 +386,16 @@ function App() {
     return examples.slice(0, 3);
   }
 
-  async function ask(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const trimmedQuestion = question.trim();
+  async function runQuestion(trimmedQuestion: string) {
     if (trimmedQuestion.length < 3) return;
 
+    setQuestion(trimmedQuestion);
     setAsking(true);
+    setRequestStartedAt(Date.now());
+    setElapsedSeconds(0);
     setQueryError('');
     setCopied(false);
+    setResult(null);
     try {
       const endpoint = isOnlineRetail
         ? '/api/ask'
@@ -275,17 +411,28 @@ function App() {
       const data = payload as AskResponse;
       setResult({
         ...data,
+        follow_up_questions: Array.isArray(data.follow_up_questions) ? data.follow_up_questions : [],
         question: trimmedQuestion,
         datasetLabel: isOnlineRetail ? 'Online Retail' : selectedUpload?.dataset_name ?? 'Uploaded dataset',
         runAt: new Date(),
       });
+      setRecentQuestions((current) => [
+        { datasetId: selectedDatasetId, question: trimmedQuestion },
+        ...current.filter((item) => item.datasetId !== selectedDatasetId || item.question !== trimmedQuestion),
+      ].slice(0, 5));
     } catch (error) {
       setQueryError(error instanceof Error
         ? error.message
         : 'Could not reach SQLPilot. Check that the API is running.');
     } finally {
       setAsking(false);
+      setRequestStartedAt(null);
     }
+  }
+
+  async function ask(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    await runQuestion(question.trim());
   }
 
   async function copySql() {
@@ -303,16 +450,29 @@ function App() {
   const schemaTableCount = isOnlineRetail ? onlineTables.length : (selectedUpload ? 1 : 0);
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" data-theme={theme}>
       <header className="topbar">
         <a className="brand" href="#top" aria-label="SQLPilot home">
           <span className="brand-mark" aria-hidden="true"><span /></span>
           <span className="brand-name">SQLPilot</span>
           <span className="brand-context">DATA WORKSPACE</span>
         </a>
-        <div className={`connection connection-${apiStatus}`}>
-          <span className="connection-dot" />
-          <span>{apiStatus === 'checking' ? 'Connecting to API' : apiStatus === 'online' ? 'API connected' : 'API unavailable'}</span>
+        <div className="topbar-actions">
+          <div className={`connection connection-${apiStatus}`}>
+            <span className="connection-dot" />
+            <span>{apiStatus === 'checking' ? 'Connecting to API' : apiStatus === 'online' ? 'API connected' : 'API unavailable'}</span>
+          </div>
+          <button
+            type="button"
+            className="theme-toggle"
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            aria-pressed={theme === 'dark'}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+          >
+            <span aria-hidden="true">{theme === 'dark' ? '☼' : '◐'}</span>
+            <span>{theme === 'dark' ? 'Dark' : 'Light'}</span>
+          </button>
         </div>
       </header>
 
@@ -321,7 +481,7 @@ function App() {
           <div>
             <p className="eyebrow">NATURAL LANGUAGE · POSTGRESQL</p>
             <h1>Ask your data.</h1>
-            <p className="page-intro">Explore a dataset in plain English. Review the SQLPilot generated and the rows it returned.</p>
+            <p className="page-intro">Ask a question, get a clear answer, and explore the rows behind it.</p>
           </div>
           <div className="heading-note"><span className="sparkle">✳</span><span>Local analysis<br /><strong>Your data stays in this workspace</strong></span></div>
         </section>
@@ -335,26 +495,49 @@ function App() {
               </div>
 
               <label className="field-label" htmlFor="dataset-select">ACTIVE DATASET</label>
-              <select id="dataset-select" value={selectedDatasetId} onChange={(event) => chooseDataset(event.target.value)}>
+              <select id="dataset-select" value={selectedDatasetId} disabled={asking || uploading} onChange={(event) => chooseDataset(event.target.value)}>
                 <option value={ONLINE_RETAIL}>Online Retail · built in</option>
                 {uploadedDatasets.map((dataset) => (
                   <option key={dataset.dataset_id} value={dataset.dataset_id}>{dataset.dataset_name} · uploaded</option>
                 ))}
               </select>
 
-              <div className="upload-box">
+              <div
+                className={'upload-box' + (draggingFile ? ' is-dragging' : '')}
+                onDragOver={(event) => {
+                  event.preventDefault();
+                  if (!uploading && !asking) setDraggingFile(true);
+                }}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDraggingFile(false);
+                }}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  setDraggingFile(false);
+                  if (!uploading && !asking) void uploadCsv(event.dataTransfer.files[0]);
+                }}
+              >
                 <div className="upload-symbol" aria-hidden="true">↑</div>
-                <div className="upload-copy"><strong>Bring your own CSV</strong><span>UTF-8 · up to 10 MiB</span></div>
+                <div className="upload-copy"><strong>Upload a CSV</strong><span>Drop a file here or browse · up to 10 MiB</span></div>
                 <input
                   ref={fileInput}
                   id="csv-upload"
                   className="visually-hidden"
                   type="file"
                   accept=".csv,text/csv,application/csv"
-                  disabled={uploading}
+                  disabled={uploading || asking}
+                  aria-hidden="true"
+                  tabIndex={-1}
                   onChange={(event) => void uploadCsv(event.target.files?.[0])}
                 />
-                <label htmlFor="csv-upload" className={`upload-button${uploading ? ' disabled' : ''}`}>{uploading ? 'Uploading…' : 'Browse'}</label>
+                <button
+                  type="button"
+                  className="upload-button"
+                  disabled={uploading || asking}
+                  onClick={() => fileInput.current?.click()}
+                >
+                  {uploading ? 'Uploading…' : 'Choose file'}
+                </button>
               </div>
               {uploadMessage && <p className="inline-message success-message" role="status">{uploadMessage}</p>}
               {uploadError && <p className="inline-message error-message" role="alert">{uploadError}</p>}
@@ -390,6 +573,8 @@ function App() {
                       </details>
                     ))}
                   </div>
+                ) : schemaError ? (
+                  <div className="schema-empty schema-error" role="status">{schemaError}</div>
                 ) : <div className="schema-empty"><span className="mini-loader" />Loading the built-in database schema…</div>
               ) : selectedUpload ? (
                 <div className="column-list uploaded-columns">
@@ -431,33 +616,93 @@ function App() {
                 <div className="example-list">
                   {exampleQuestions().map((example) => <button type="button" className="example-chip" key={example} onClick={() => setQuestion(example)}>{example}<span aria-hidden="true">↗</span></button>)}
                 </div>
+                {recentQuestions.some((item) => item.datasetId === selectedDatasetId) && (
+                  <div className="recent-questions">
+                    <div className="examples-label"><span>RECENT IN THIS SESSION</span><span className="examples-rule" /></div>
+                    <div className="example-list">
+                      {recentQuestions.filter((item) => item.datasetId === selectedDatasetId).map((item) => (
+                        <button
+                          type="button"
+                          className="example-chip recent-question"
+                          key={item.question}
+                          disabled={asking}
+                          onClick={() => void runQuestion(item.question)}
+                        >
+                          {item.question}<span aria-hidden="true">↻</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </section>
 
             {queryError && <section className="query-error" role="alert"><span className="error-mark">!</span><div><strong>Query didn’t complete</strong><p>{queryError}</p><span>Check the dataset and question, then try again.</span></div></section>}
 
-            {asking && <section className="card progress-card" aria-live="polite"><span className="progress-spinner" /><div><strong>Working through your question</strong><p>Generating SQL, checking it, then fetching the result rows.</p></div><span className="progress-stage">RUNNING</span></section>}
+            {asking && (
+              <section className="card progress-card" aria-live="polite">
+                <span className="progress-spinner" />
+                <div>
+                  <strong>{elapsedSeconds >= 5 ? 'The local model is taking a moment' : 'Sending your question to the local model'}</strong>
+                  <p>SQLPilot will validate the query before fetching any rows.</p>
+                </div>
+                <span className="progress-stage">{elapsedSeconds}s</span>
+              </section>
+            )}
 
             {result ? (
               <section className="result-section">
-                <div className="results-title-row"><div><p className="section-kicker">03 / RESULT</p><h2>Query result</h2></div><span className="run-badge"><span /> COMPLETED</span></div>
+                <div className="results-title-row"><div><p className="section-kicker">03 / ANSWER</p><h2>Your data, explained</h2></div><span className="run-badge"><span /> READY</span></div>
                 <div className="card answer-card">
-                  <div className="answer-header"><span className="answer-icon" aria-hidden="true">✳</span><div><p>SQLPILOT’S EXPLANATION</p><strong>{result.datasetLabel}</strong></div><time>{result.runAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div>
+                  <div className="answer-header"><span className="answer-icon" aria-hidden="true">✳</span><div><p>ANSWER</p><strong>{result.datasetLabel}</strong></div><time>{result.runAt.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</time></div>
                   <div className="answer-body"><p className="asked-question"><span>YOU ASKED</span>{result.question}</p><p className="explanation">{result.explanation}</p></div>
                 </div>
 
-                <div className="card sql-card">
-                  <div className="sql-header"><div><span className="sql-icon">&lt;/&gt;</span><div><p>GENERATED SQL</p><span>Read-only PostgreSQL query</span></div></div><button type="button" className="copy-button" onClick={() => void copySql()} disabled={!result.sql}>{copied ? 'Copied ✓' : 'Copy SQL'}</button></div>
-                  {result.sql ? <pre className="sql-code"><code>{result.sql}</code></pre> : <p className="no-sql">No SQL was generated. See the explanation above for more detail.</p>}
-                </div>
+                <ResultKpis result={result} />
+                <ResultChart result={result} />
 
                 <div className="card data-card">
-                  <div className="data-header"><div><p>RESULT ROWS</p><span>{result.row_count.toLocaleString()} {result.row_count === 1 ? 'row' : 'rows'} returned</span></div><span className="table-indicator"><span /> QUERY OUTPUT</span></div>
+                  <div className="data-header"><div><p>RESULT TABLE</p><span>{result.row_count.toLocaleString()} {result.row_count === 1 ? 'row' : 'rows'} returned</span></div><span className="table-indicator"><span /> QUERY OUTPUT</span></div>
                   {result.rows.length > 0 && result.columns.length > 0 ? (
                     <div className="result-table-scroll"><table className="result-table"><thead><tr>{result.columns.map((column) => <th key={column}>{prettyName(column)}</th>)}</tr></thead><tbody>{result.rows.map((row, index) => <tr key={index}>{result.columns.map((column) => <td key={column}>{formatValue(row[column])}</td>)}</tr>)}</tbody></table></div>
                   ) : <div className="no-rows"><span>∅</span><strong>No rows to display</strong><p>{result.sql ? 'The query ran successfully and returned no matching records.' : 'This question did not produce a SQL query.'}</p></div>}
-                  {result.rows.length > 0 && <div className="table-foot">Showing {result.rows.length.toLocaleString()} of {result.row_count.toLocaleString()} returned {result.row_count === 1 ? 'row' : 'rows'}</div>}
+                  {result.rows.length > 0 && <div className="table-foot">Showing all {result.rows.length.toLocaleString()} returned {result.rows.length === 1 ? 'row' : 'rows'}.</div>}
                 </div>
+
+                {result.follow_up_questions.length > 0 && (
+                  <section className="card follow-up-card" aria-label="Suggested follow-up questions">
+                    <div className="follow-up-heading"><span aria-hidden="true">↳</span><div><strong>Keep exploring</strong><p>Ask a follow-up about this dataset</p></div></div>
+                    <div className="follow-up-list">
+                      {result.follow_up_questions.map((suggestion) => (
+                        <button
+                          type="button"
+                          className="follow-up-chip"
+                          key={suggestion}
+                          disabled={asking}
+                          onClick={() => void runQuestion(suggestion)}
+                        >
+                          {suggestion}<span aria-hidden="true">↗</span>
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {result.sql ? (
+                  <details className="card sql-disclosure">
+                    <summary className="sql-disclosure-summary">
+                      <span className="sql-icon">&lt;/&gt;</span>
+                      <span className="sql-disclosure-copy"><strong>Generated SQL</strong><small>Read-only PostgreSQL query</small></span>
+                      <span className="sql-disclosure-action">Show query <span aria-hidden="true">⌄</span></span>
+                    </summary>
+                    <div className="sql-disclosure-body">
+                      <div className="sql-copy-row"><span>Used to produce this answer</span><button type="button" className="copy-button" onClick={() => void copySql()}>{copied ? 'Copied ✓' : 'Copy SQL'}</button></div>
+                      <pre className="sql-code"><code>{result.sql}</code></pre>
+                    </div>
+                  </details>
+                ) : (
+                  <div className="no-sql">No query was needed for this response.</div>
+                )}
               </section>
             ) : !asking && !queryError ? (
               <section className="card empty-state"><div className="empty-illustration" aria-hidden="true"><span className="empty-lines"><i /><i /><i /></span><span className="empty-search">⌕</span></div><p className="section-kicker">READY WHEN YOU ARE</p><h2>Your query workspace</h2><p>Ask a question to see the SQL, explanation, and result rows here.</p><div className="empty-steps"><span><b>01</b> Choose data</span><i /><span><b>02</b> Ask naturally</span><i /><span><b>03</b> Inspect SQL</span></div></section>

@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       proxy: { '/api': env.API_PROXY_TARGET || 'http://localhost:8000' },
+      watch: { usePolling: true, interval: 500 },
     },
   };
 });
