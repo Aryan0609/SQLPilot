@@ -1,0 +1,122 @@
+[
+  {
+    "id": "Q001",
+    "category": "basic",
+    "question": "How many customers are registered?",
+    "reference_sql": "SELECT COUNT(*) AS total_customers FROM customers"
+  },
+  {
+    "id": "Q002",
+    "category": "basic",
+    "question": "How many invoices are recorded in the database?",
+    "reference_sql": "SELECT COUNT(*) AS total_invoices FROM orders"
+  },
+  {
+    "id": "Q003",
+    "category": "basic",
+    "question": "How many distinct products are available?",
+    "reference_sql": "SELECT COUNT(*) AS total_products FROM products"
+  },
+  {
+    "id": "Q004",
+    "category": "basic",
+    "question": "How many units were sold in completed sales, excluding returned items and zero-priced items?",
+    "reference_sql": "SELECT SUM(oi.quantity) AS total_units_sold FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0"
+  },
+  {
+    "id": "Q005",
+    "category": "basic",
+    "question": "What is the total revenue from completed sales, excluding cancelled invoices, returned items, and zero-priced items?",
+    "reference_sql": "SELECT SUM(oi.quantity * oi.unit_price) AS total_revenue FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0"
+  },
+  {
+    "id": "Q006",
+    "category": "intermediate",
+    "question": "Show revenue by country from completed sales, excluding customers with missing IDs, cancelled invoices, returned items, and zero-priced items. Sort by revenue descending.",
+    "reference_sql": "SELECT c.country, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM customers c JOIN orders o ON c.customer_id = o.customer_id JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY c.country ORDER BY total_revenue DESC"
+  },
+  {
+    "id": "Q007",
+    "category": "intermediate",
+    "question": "Show the top 10 products by revenue from completed sales, excluding returns and zero-priced items.",
+    "reference_sql": "SELECT p.stock_code, p.description, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM products p JOIN order_items oi ON p.stock_code = oi.stock_code JOIN orders o ON oi.invoice_no = o.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY p.stock_code, p.description ORDER BY total_revenue DESC LIMIT 10"
+  },
+  {
+    "id": "Q008",
+    "category": "intermediate",
+    "question": "Show the top 10 customers by total spending from completed sales, excluding returns and zero-priced items.",
+    "reference_sql": "SELECT c.customer_id, c.country, SUM(oi.quantity * oi.unit_price) AS total_spending FROM customers c JOIN orders o ON c.customer_id = o.customer_id JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY c.customer_id, c.country ORDER BY total_spending DESC LIMIT 10"
+  },
+  {
+    "id": "Q009",
+    "category": "intermediate",
+    "question": "How many registered customers have never placed an order?",
+    "reference_sql": "SELECT COUNT(*) AS customers_without_orders FROM customers c WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.customer_id)"
+  },
+  {
+    "id": "Q010",
+    "category": "intermediate",
+    "question": "What is the average order value for completed invoices containing valid sales items?",
+    "reference_sql": "WITH invoice_totals AS (SELECT o.invoice_no, SUM(oi.quantity * oi.unit_price) AS invoice_revenue FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY o.invoice_no) SELECT AVG(invoice_revenue) AS average_order_value FROM invoice_totals"
+  },
+  {
+    "id": "Q011",
+    "category": "intermediate",
+    "question": "Show monthly revenue from completed sales, excluding returned and zero-priced items, ordered chronologically.",
+    "reference_sql": "SELECT DATE_TRUNC('month', o.invoice_date) AS month, SUM(oi.quantity * oi.unit_price) AS total_revenue FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY DATE_TRUNC('month', o.invoice_date) ORDER BY month"
+  },
+  {
+    "id": "Q012",
+    "category": "intermediate",
+    "question": "How many completed invoices were recorded each month? Show the months chronologically.",
+    "reference_sql": "SELECT DATE_TRUNC('month', invoice_date) AS month, COUNT(*) AS completed_invoices FROM orders WHERE is_cancelled = FALSE GROUP BY DATE_TRUNC('month', invoice_date) ORDER BY month"
+  },
+  {
+    "id": "Q013",
+    "category": "intermediate",
+    "question": "Find products that have never generated positive revenue from completed sales.",
+    "reference_sql": "SELECT p.stock_code, p.description FROM products p WHERE NOT EXISTS (SELECT 1 FROM order_items oi JOIN orders o ON oi.invoice_no = o.invoice_no WHERE oi.stock_code = p.stock_code AND o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0) ORDER BY p.stock_code"
+  },
+  {
+    "id": "Q014",
+    "category": "intermediate",
+    "question": "Find customers who have placed more than five completed invoices.",
+    "reference_sql": "SELECT o.customer_id, COUNT(*) AS completed_invoice_count FROM orders o WHERE o.is_cancelled = FALSE AND o.customer_id IS NOT NULL GROUP BY o.customer_id HAVING COUNT(*) > 5 ORDER BY completed_invoice_count DESC"
+  },
+  {
+    "id": "Q015",
+    "category": "intermediate",
+    "question": "Show the top 10 products by units sold in completed sales, excluding returned and zero-priced items.",
+    "reference_sql": "SELECT p.stock_code, p.description, SUM(oi.quantity) AS units_sold FROM products p JOIN order_items oi ON p.stock_code = oi.stock_code JOIN orders o ON oi.invoice_no = o.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY p.stock_code, p.description ORDER BY units_sold DESC LIMIT 10"
+  },
+  {
+    "id": "Q016",
+    "category": "advanced",
+    "question": "Rank the top 20 customers by spending from completed sales, excluding returns and zero-priced items.",
+    "reference_sql": "SELECT customer_id, total_spending, RANK() OVER (ORDER BY total_spending DESC) AS spending_rank FROM (SELECT o.customer_id, SUM(oi.quantity * oi.unit_price) AS total_spending FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND o.customer_id IS NOT NULL AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY o.customer_id) customer_totals ORDER BY spending_rank, customer_id LIMIT 20"
+  },
+  {
+    "id": "Q017",
+    "category": "advanced",
+    "question": "Show monthly revenue and cumulative revenue from completed sales, excluding returns and zero-priced items.",
+    "reference_sql": "WITH monthly_sales AS (SELECT DATE_TRUNC('month', o.invoice_date) AS month, SUM(oi.quantity * oi.unit_price) AS monthly_revenue FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY DATE_TRUNC('month', o.invoice_date)) SELECT month, monthly_revenue, SUM(monthly_revenue) OVER (ORDER BY month) AS cumulative_revenue FROM monthly_sales ORDER BY month"
+  },
+  {
+    "id": "Q018",
+    "category": "advanced",
+    "question": "Find customers whose spending is above the average spending per customer, considering only customers with recorded valid sales.",
+    "reference_sql": "WITH customer_spending AS (SELECT o.customer_id, SUM(oi.quantity * oi.unit_price) AS total_spending FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND o.customer_id IS NOT NULL AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY o.customer_id), average_spending AS (SELECT AVG(total_spending) AS avg_spending FROM customer_spending) SELECT cs.customer_id, cs.total_spending FROM customer_spending cs CROSS JOIN average_spending a WHERE cs.total_spending > a.avg_spending ORDER BY cs.total_spending DESC"
+  },
+  {
+    "id": "Q019",
+    "category": "advanced",
+    "question": "Show each country's percentage contribution to total revenue from completed sales, considering only customers with known IDs. Sort by contribution descending.",
+    "reference_sql": "WITH country_revenue AS (SELECT c.country, SUM(oi.quantity * oi.unit_price) AS revenue FROM customers c JOIN orders o ON c.customer_id = o.customer_id JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY c.country) SELECT country, revenue, ROUND(100.0 * revenue / SUM(revenue) OVER (), 2) AS revenue_percentage FROM country_revenue ORDER BY revenue_percentage DESC"
+  },
+  {
+    "id": "Q020",
+    "category": "advanced",
+    "question": "Calculate monthly revenue growth percentage compared with the previous month for completed sales, excluding returns and zero-priced items.",
+    "reference_sql": "WITH monthly_sales AS (SELECT DATE_TRUNC('month', o.invoice_date) AS month, SUM(oi.quantity * oi.unit_price) AS monthly_revenue FROM orders o JOIN order_items oi ON o.invoice_no = oi.invoice_no WHERE o.is_cancelled = FALSE AND oi.quantity > 0 AND oi.unit_price > 0 GROUP BY DATE_TRUNC('month', o.invoice_date)), revenue_with_previous AS (SELECT month, monthly_revenue, LAG(monthly_revenue) OVER (ORDER BY month) AS previous_month_revenue FROM monthly_sales) SELECT month, monthly_revenue, previous_month_revenue, ROUND(100.0 * (monthly_revenue - previous_month_revenue) / NULLIF(previous_month_revenue, 0), 2) AS growth_percentage FROM revenue_with_previous ORDER BY month"
+  }
+]

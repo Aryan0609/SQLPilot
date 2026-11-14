@@ -1,0 +1,44 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sqlpilot}
+      POSTGRES_USER: ${POSTGRES_USER:-sqlpilot_writer}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_me}
+      SQLPILOT_READONLY_PASSWORD: ${SQLPILOT_READONLY_PASSWORD:-change_readonly}
+    ports: ["5432:5432"]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/01-reader.sh:/docker-entrypoint-initdb.d/01-reader.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sqlpilot_writer} -d ${POSTGRES_DB:-sqlpilot}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  init:
+    build: ./backend
+    env_file: .env
+    command: ["python", "-m", "app.init_db"]
+    depends_on:
+      db: { condition: service_healthy }
+    restart: "no"
+  ollama:
+    image: ollama/ollama:latest
+    volumes: ["ollama_data:/root/.ollama"]
+    ports: ["11434:11434"]
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+    ports: ["8000:8000"]
+    depends_on:
+      init: { condition: service_completed_successfully }
+      ollama: { condition: service_started }
+  web:
+    build: ./frontend
+    ports: ["5173:5173"]
+    depends_on: [api]
+volumes:
+  postgres_data:
+  ollama_data:

@@ -1,0 +1,43 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+node_modules/
+dist/
+data/raw/
+.DS_Store
+
+# Environment files and secrets
+.env.*
+!.env.example
+
+# Python
+*.py[cod]
+venv/
+
+# Frontend builds
+frontend/dist/
+frontend/build/
+
+# Test and coverage output
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Local databases and backups
+*.sqlite
+*.sqlite3
+*.db
+*.dump
+*.backup
+
+# OS and editor files
+.DS_Store
+.idea/
+
+# Local model files
+*.gguf
+*.safetensors
+
+# TypeScript build metadata
+*.tsbuildinfo
